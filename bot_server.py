@@ -1,0 +1,130 @@
+import os
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+app = FastAPI()
+
+# Разрешаем приложению обращаться к серверу
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+# Системный промпт для общего чата в боте
+CHAT_PROMPT = """Ты — финансовый ИИ-ассистент приложения "Мой бюджет".
+Помогаешь пользователям с личными финансами: советы по накоплению,
+планированию бюджета, инвестициям, управлению долгами.
+Отвечай кратко, по делу, на русском языке.
+Используй цифры и конкретные советы. Будь дружелюбным."""
+
+# Системный промпт для персональных советов на основе статистики
+ADVICE_PROMPT = """Ты — персональный финансовый ИИ-аналитик.
+Тебе дают реальную статистику пользователя: доходы, расходы по категориям,
+цели накопления и долги. Проанализируй данные и дай конкретные персональные советы.
+Отвечай на русском, кратко и по делу. Указывай на проблемы (например, слишком большая
+доля расходов на категорию) и давай практические рекомендации с цифрами.
+Будь дружелюбным и поддерживающим, но честным."""
+
+
+async def send_message(chat_id: int, text: str):
+    async with httpx.AsyncClient() as client:
+        await client.post(f"{TELEGRAM_API}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown"
+        })
+
+
+async def ask_claude(user_message: str, system_prompt: str) -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 1024,
+                "system": system_prompt,
+                "messages": [
+                    {"role": "user", "content": user_message}
+                ]
+            }
+        )
+        data = response.json()
+        return data["content"][0]["text"]
+
+
+# ===== TELEGRAM BOT =====
+@app.post("/webhook")
+async def webhook(request: Request):
+    body = await request.json()
+    message = body.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    text = message.get("text", "")
+
+    if not chat_id or not text:
+        return {"ok": True}
+
+    if text == "/start":
+        welcome = (
+            "Привет! Я финансовый ИИ-ассистент 💰\n\n"
+            "Помогу тебе с:\n"
+            "• Планированием бюджета\n"
+            "• Советами по накоплению\n"
+            "• Вопросами по инвестициям\n"
+            "• Управлением долгами\n\n"
+            "Просто напиши свой вопрос!"
+        )
+        await send_message(chat_id, welcome)
+        return {"ok": True}
+
+    async with httpx.AsyncClient() as client:
+        await client.post(f"{TELEGRAM_API}/sendChatAction", json={
+            "chat_id": chat_id,
+            "action": "typing"
+        })
+
+    try:
+        reply = await ask_claude(text, CHAT_PROMPT)
+        await send_message(chat_id, reply)
+    except Exception:
+        await send_message(chat_id, "Что-то пошло не так, попробуй ещё раз 🙏")
+
+    return {"ok": True}
+
+
+# ===== APP ADVICE BUTTON =====
+class AdviceRequest(BaseModel):
+    stats: str
+    question: str = ""
+
+
+@app.post("/advice")
+async def advice(req: AdviceRequest):
+    user_message = "Вот моя финансовая статистика:\n" + req.stats
+    if req.question:
+        user_message += "\n\nМой вопрос: " + req.question
+    else:
+        user_message += "\n\nДай мне персональные советы по улучшению финансов."
+
+    try:
+        reply = await ask_claude(user_message, ADVICE_PROMPT)
+        return {"ok": True, "advice": reply}
+    except Exception:
+        return {"ok": False, "advice": "Не удалось получить совет, попробуй позже."}
+
+
+@app.get("/")
+async def root():
+    return {"status": "Bot is running!"}
