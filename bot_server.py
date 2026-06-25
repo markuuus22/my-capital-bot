@@ -133,3 +133,18 @@ async def advice(req: AdviceRequest):
 @app.get("/")
 async def root():
     return {"status": "Bot is running!"}
+
+
+@app.get("/debug")
+async def debug():
+    t = TELEGRAM_TOKEN or ""
+    # Безопасно показываем только структуру токена
+    masked = (t[:8] + "..." + t[-4:]) if len(t) > 12 else "TOO SHORT OR EMPTY"
+    has_space = (t != t.strip()) or (" " in t)
+    return {
+        "token_length": len(t),
+        "token_preview": masked,
+        "has_space_or_whitespace": has_space,
+        "anthropic_key_set": bool(ANTHROPIC_API_KEY),
+        "anthropic_key_length": len(ANTHROPIC_API_KEY or "")
+    }
