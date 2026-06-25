@@ -1,4 +1,5 @@
 import os
+import traceback
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,7 +7,6 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-# Разрешаем приложению обращаться к серверу
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,29 +18,26 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Системный промпт для общего чата в боте
 CHAT_PROMPT = """Ты — финансовый ИИ-ассистент приложения "Мой бюджет".
 Помогаешь пользователям с личными финансами: советы по накоплению,
 планированию бюджета, инвестициям, управлению долгами.
 Отвечай кратко, по делу, на русском языке.
 Используй цифры и конкретные советы. Будь дружелюбным."""
 
-# Системный промпт для персональных советов на основе статистики
 ADVICE_PROMPT = """Ты — персональный финансовый ИИ-аналитик.
 Тебе дают реальную статистику пользователя: доходы, расходы по категориям,
 цели накопления и долги. Проанализируй данные и дай конкретные персональные советы.
-Отвечай на русском, кратко и по делу. Указывай на проблемы (например, слишком большая
-доля расходов на категорию) и давай практические рекомендации с цифрами.
-Будь дружелюбным и поддерживающим, но честным."""
+Отвечай на русском, кратко и по делу. Указывай на проблемы и давай практические
+рекомендации с цифрами. Будь дружелюбным и поддерживающим, но честным."""
 
 
 async def send_message(chat_id: int, text: str):
     async with httpx.AsyncClient() as client:
-        await client.post(f"{TELEGRAM_API}/sendMessage", json={
+        r = await client.post(f"{TELEGRAM_API}/sendMessage", json={
             "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
+            "text": text
         })
+        print("TELEGRAM SEND:", r.status_code, r.text[:300], flush=True)
 
 
 async def ask_claude(user_message: str, system_prompt: str) -> str:
@@ -61,11 +58,14 @@ async def ask_claude(user_message: str, system_prompt: str) -> str:
                 ]
             }
         )
+        print("CLAUDE STATUS:", response.status_code, flush=True)
         data = response.json()
+        if "content" not in data:
+            print("CLAUDE ERROR RESPONSE:", data, flush=True)
+            raise Exception("No content in response: " + str(data))
         return data["content"][0]["text"]
 
 
-# ===== TELEGRAM BOT =====
 @app.post("/webhook")
 async def webhook(request: Request):
     body = await request.json()
@@ -73,17 +73,19 @@ async def webhook(request: Request):
     chat_id = message.get("chat", {}).get("id")
     text = message.get("text", "")
 
+    print("INCOMING:", chat_id, repr(text), flush=True)
+
     if not chat_id or not text:
         return {"ok": True}
 
     if text == "/start":
         welcome = (
-            "Привет! Я финансовый ИИ-ассистент 💰\n\n"
+            "Привет! Я финансовый ИИ-ассистент.\n\n"
             "Помогу тебе с:\n"
-            "• Планированием бюджета\n"
-            "• Советами по накоплению\n"
-            "• Вопросами по инвестициям\n"
-            "• Управлением долгами\n\n"
+            "- Планированием бюджета\n"
+            "- Советами по накоплению\n"
+            "- Вопросами по инвестициям\n"
+            "- Управлением долгами\n\n"
             "Просто напиши свой вопрос!"
         )
         await send_message(chat_id, welcome)
@@ -98,13 +100,14 @@ async def webhook(request: Request):
     try:
         reply = await ask_claude(text, CHAT_PROMPT)
         await send_message(chat_id, reply)
-    except Exception:
-        await send_message(chat_id, "Что-то пошло не так, попробуй ещё раз 🙏")
+    except Exception as e:
+        print("ERROR IN WEBHOOK:", str(e), flush=True)
+        traceback.print_exc()
+        await send_message(chat_id, "Ошибка: " + str(e)[:200])
 
     return {"ok": True}
 
 
-# ===== APP ADVICE BUTTON =====
 class AdviceRequest(BaseModel):
     stats: str
     question: str = ""
@@ -121,8 +124,10 @@ async def advice(req: AdviceRequest):
     try:
         reply = await ask_claude(user_message, ADVICE_PROMPT)
         return {"ok": True, "advice": reply}
-    except Exception:
-        return {"ok": False, "advice": "Не удалось получить совет, попробуй позже."}
+    except Exception as e:
+        print("ERROR IN ADVICE:", str(e), flush=True)
+        traceback.print_exc()
+        return {"ok": False, "advice": "Ошибка: " + str(e)[:200]}
 
 
 @app.get("/")
